@@ -206,7 +206,7 @@ const Collapsible = ({
         return;
       }
       if (measureState === "measuring") {
-        (contentRef.current as View).measure((x, y, width, height) => {
+        (contentRef.current as View).measure((_x, _y, _width, height) => {
           if (unmounted.current) {
             return;
           }
