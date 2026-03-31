@@ -2,302 +2,227 @@ import React, {
   ReactNode,
   useCallback,
   useEffect,
-  useMemo,
+  useReducer,
   useRef,
-  useState,
 } from "react";
-import {
-  Animated,
+import { LayoutChangeEvent, StyleProp, ViewStyle } from "react-native";
+import Animated, {
   Easing,
   EasingFunction,
-  LayoutChangeEvent,
-  StyleProp,
-  View,
-  ViewStyle,
-} from "react-native";
+  interpolate,
+  measure,
+  runOnJS,
+  runOnUI,
+  useAnimatedRef,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
 
 export interface CollapsibleProps {
-  /**
-   * Alignment of the content when transitioning, can be top, center or bottom
-   *
-   * @default top
-   */
+  /** Alignment of content during transition. @default "top" */
   align?: "top" | "center" | "bottom";
-  /**
-   * Whether to show the child components or not
-   *
-   * @default true
-   */
+  /** Whether the content is collapsed. @default true */
   collapsed?: boolean;
-  /**
-   * Which height should the component collapse to
-   *
-   * @default 0
-   */
+  /** Height to collapse to. @default 0 */
   collapsedHeight?: number;
-  /**
-   * Duration of transition in milliseconds
-   *
-   * @default 300
-   */
+  /** Transition duration in milliseconds. @default 300 */
   duration?: number;
-
-  /**
-   * Enable pointer events on collapsed view
-   *
-   * @default false
-   */
-  enablePointerEvents?: boolean;
-
-  /**
-   * Function or function name from Easing (or tween-functions if < RN 0.8). Collapsible will try to combine Easing functions for you if you name them like tween-functions
-   *
-   * @default easeOutCubic
-   */
+  /** Easing function for the transition. @default Easing.inOut(Easing.cubic) */
   easing?: EasingFunction;
-
-  /**
-   * Render children in collapsible even if not visible
-   *
-   * @default true
-   */
+  /** Allow pointer events while collapsed. @default false */
+  enablePointerEvents?: boolean;
+  /** Keep children mounted while collapsed. @default true */
   renderChildrenCollapsed?: boolean;
-
-  /**
-   * Optional styling for the container
-   */
+  /** Style for the content container */
   style?: StyleProp<ViewStyle>;
-
-  /**
-   * Function called when the animation finished
-   */
+  /** Called when the expand/collapse animation completes */
   onAnimationEnd?: () => void;
-
   children: ReactNode;
 }
 
-const normalizeSpeed = (duration: number, height: number) => {
-  if (height > 800) {
-    return duration;
-  }
-  return Math.max(0.25, height / 800) * duration;
-};
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
 
-/**
- * Component goes through 3 states:
- * initial: initial state, component mounted and content not measured yet
- * measuring: component measuring content by showing content with opacity 0
- * measured: component finished measuring content and can transition
- * stale: in-between state reserved for extra render cycle when content is re-opened
- */
-type MeasureState = "initial" | "measuring" | "measured" | "stale";
+type Phase =
+  | { status: "collapsed" }
+  | { status: "measuring" }
+  | { status: "open"; contentHeight: number; animate: boolean };
+
+type Action =
+  | { type: "OPEN" }
+  | { type: "CLOSE" }
+  | { type: "MEASURED"; height: number }
+  | { type: "CONTENT_RESIZED"; height: number };
+
+function reducer(state: Phase, action: Action): Phase {
+  switch (action.type) {
+    case "OPEN":
+      return state.status === "collapsed" ? { status: "measuring" } : state;
+    case "CLOSE":
+      return { status: "collapsed" };
+    case "MEASURED":
+      return { status: "open", contentHeight: action.height, animate: true };
+    case "CONTENT_RESIZED":
+      return { status: "open", contentHeight: action.height, animate: false };
+    default:
+      return state;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 const Collapsible = ({
   align = "top",
   collapsed = true,
   collapsedHeight = 0,
-  enablePointerEvents = false,
-  duration = 800,
+  duration = 300,
   easing = Easing.inOut(Easing.cubic),
+  enablePointerEvents = false,
   onAnimationEnd,
   renderChildrenCollapsed = true,
   style,
   children,
 }: CollapsibleProps) => {
-  const [measureState, setMeasureState] = useState<MeasureState>("initial");
-
-  const [contentHeight, setContentHeight] = useState(0);
-  const [animating, setAnimating] = useState(false);
-
-  const heightValue = useRef(new Animated.Value(collapsedHeight)).current;
-  const animationRef = useRef<Animated.CompositeAnimation>(undefined);
-  const contentRef = useRef<View | Animated.LegacyRef<View>>(null);
-  const unmounted = useRef(false);
-  const savedState = useRef({
-    collapsed,
-    measureState,
-    initiallyOpen: !collapsed,
-  }).current;
-
-  useEffect(
-    () => () => {
-      unmounted.current = true;
-    },
-    []
+  const [phase, dispatch] = useReducer(
+    reducer,
+    collapsed ? { status: "collapsed" } : { status: "measuring" }
   );
 
-  const transitionToHeight = useCallback(
-    (height = 0) => {
-      if (animationRef.current) {
-        animationRef.current.stop();
-      }
-      if (savedState.initiallyOpen) {
-        // If the content is initially open, we don't want to animate the initial height
-        savedState.initiallyOpen = false;
-        heightValue.setValue(height);
+  const prevCollapsed = useRef(collapsed);
+  // When initially open, skip the opening animation
+  const skipNextAnimation = useRef(!collapsed);
+
+  const contentRef = useAnimatedRef<Animated.View>();
+  const heightSV = useSharedValue(collapsed ? collapsedHeight : 0);
+  const contentHeightSV = useSharedValue(0);
+
+  const handleAnimationEnd = useCallback(() => {
+    onAnimationEnd?.();
+  }, [onAnimationEnd]);
+
+  const animateTo = useCallback(
+    (toValue: number) => {
+      if (skipNextAnimation.current) {
+        skipNextAnimation.current = false;
+        heightSV.value = toValue;
+        handleAnimationEnd();
         return;
       }
-      const animation = Animated.timing(heightValue, {
-        useNativeDriver: false,
-        toValue: height,
-        duration: normalizeSpeed(duration, height),
-        easing,
-      });
-      animation.start(() => {
-        if (unmounted.current) {
-          return;
+      heightSV.value = withTiming(
+        toValue,
+        { duration, easing },
+        (finished: boolean | undefined) => {
+          if (finished) runOnJS(handleAnimationEnd)();
         }
-        setAnimating(false);
-        if (typeof onAnimationEnd === "function") {
-          onAnimationEnd();
-        }
-      });
-      animationRef.current = animation;
-      setAnimating(true);
+      );
     },
-    [duration, easing, heightValue, onAnimationEnd, savedState]
+    [duration, easing, heightSV, handleAnimationEnd]
   );
 
+  // React to collapsed prop flips
   useEffect(() => {
-    /**
-     * React on collapsed prop change
-     */
+    if (collapsed === prevCollapsed.current) return;
+    prevCollapsed.current = collapsed;
 
-    if (collapsed !== savedState.collapsed) {
-      savedState.collapsed = collapsed;
-      if (collapsed) {
-        transitionToHeight(collapsedHeight);
-      } else if (measureState === "initial") {
-        setMeasureState("measuring");
-      } else {
-        setMeasureState("stale");
-      }
-    } else if (measureState === "initial" && !collapsed) {
-      setMeasureState("stale");
+    if (collapsed) {
+      dispatch({ type: "CLOSE" });
+      animateTo(collapsedHeight);
+    } else {
+      dispatch({ type: "OPEN" });
     }
-  }, [
-    collapsed,
-    collapsedHeight,
-    contentHeight,
-    measureState,
-    savedState,
-    transitionToHeight,
-  ]);
+  }, [collapsed, collapsedHeight, animateTo]);
 
+  // Trigger measurement when entering the measuring phase
   useEffect(() => {
-    /**
-     * Measure the height of the content before expanding the first time
-     * onLayout handle should take care of future updates
-     */
-    if (savedState.measureState !== measureState) {
-      savedState.measureState = measureState;
-      if (measureState === "stale") {
-        /**
-         * "stale" measure state means that we are not opening the content first time
-         * We need one render cycle more to get the right height of the content
-         * We need to do this because the content might have been updated
-         */
-         
-        requestAnimationFrame(() => {
-          if (!unmounted.current) {
-            setMeasureState("measuring");
-          }
-        });
-        return;
-      }
-      if (measureState === "measuring") {
-        (contentRef.current as View).measure((_x, _y, _width, height) => {
-          if (unmounted.current) {
-            return;
-          }
-          setMeasureState("measured");
-          setContentHeight(height);
-          transitionToHeight(height);
-        });
-      }
+    if (phase.status !== "measuring") return;
+
+    const frameId = requestAnimationFrame(() => {
+      runOnUI(() => {
+        "worklet";
+        const result = measure(contentRef);
+        if (result !== null) {
+          runOnJS(dispatch)({ type: "MEASURED", height: result.height });
+        }
+      })();
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [phase.status, contentRef]);
+
+  // Animate when content height becomes known
+  useEffect(() => {
+    if (phase.status !== "open" || !phase.animate) return;
+    contentHeightSV.value = phase.contentHeight;
+    animateTo(phase.contentHeight);
+  }, [phase, contentHeightSV, animateTo]);
+
+  const onLayoutWhenOpen = useCallback(
+    (event: LayoutChangeEvent) => {
+      if (phase.status !== "open") return;
+      const newHeight = event.nativeEvent.layout.height;
+      if (newHeight === phase.contentHeight) return;
+      // Content resized while open — snap immediately, no animation
+      heightSV.value = newHeight;
+      contentHeightSV.value = newHeight;
+      dispatch({ type: "CONTENT_RESIZED", height: newHeight });
+    },
+    [phase, heightSV, contentHeightSV]
+  );
+
+  const rootStyle = useAnimatedStyle(() => ({
+    overflow: "hidden",
+    height: heightSV.value,
+  }));
+
+  const innerStyle = useAnimatedStyle(() => {
+    const ch = contentHeightSV.value;
+    if (ch === 0 || align === "top") return {};
+
+    if (align === "center") {
+      return {
+        transform: [
+          {
+            translateY: interpolate(heightSV.value, [0, ch], [ch / -2, 0]),
+          },
+        ],
+      };
     }
-  }, [measureState, savedState, transitionToHeight]);
 
-  const onLayoutWhenOpen = (event: LayoutChangeEvent) => {
-    const { height } = event.nativeEvent.layout;
-    if (measureState === "measuring" || height === contentHeight) {
-      return;
-    }
-
-    heightValue.setValue(height);
-    setContentHeight(height);
-  };
-
-  const contentStyle = useMemo(() => {
-    const contentStyle: ViewStyle = {};
-    if (measureState !== "measured") {
-      /**
-       * Let's render the content with opacity 0 until
-       * we have measured it
-       */
-      contentStyle.position = "absolute";
-      contentStyle.opacity = 0;
-    } else if (align === "center") {
-      contentStyle.transform = [
+    // bottom
+    return {
+      transform: [
         {
-          translateY: heightValue.interpolate({
-            inputRange: [0, contentHeight],
-            outputRange: [contentHeight / -2, 0],
-          }),
+          translateY: interpolate(heightSV.value, [0, ch], [-ch, 0]),
         },
-      ];
-    } else if (align === "bottom") {
-      contentStyle.transform = [
-        {
-          translateY: heightValue.interpolate({
-            inputRange: [0, contentHeight],
-            outputRange: [-contentHeight, 0],
-          }),
-        },
-      ];
-    }
-    if (animating) {
-      contentStyle.height = contentHeight;
-    }
-    return contentStyle;
-  }, [align, animating, contentHeight, heightValue, measureState]);
+      ],
+    };
+  });
 
-  const rootStyle = useMemo(() => {
-    const hasKnownHeight = measureState === "measured" || collapsed;
-    return hasKnownHeight
-      ? ({
-          overflow: "hidden",
-          height: heightValue,
-        } as ViewStyle)
-      : undefined;
-  }, [collapsed, heightValue, measureState]);
-
-  /**
-   * Render children
-   * if renderChildrenCollapsed prop is true
-   *  or if not then
-   * if content is not collapsed
-   *  or if not then
-   * if content is animating
-   *  or if not then
-   * if measureState is "stale" or "measuring"
-   */
+  const isOpen = phase.status === "open";
   const shouldRenderChildren =
-    renderChildrenCollapsed ||
-    !collapsed ||
-    animating ||
-    measureState === "stale" ||
-    measureState === "measuring";
+    renderChildrenCollapsed || isOpen || phase.status === "measuring";
 
   return (
     <Animated.View
-      style={rootStyle}
-      pointerEvents={!enablePointerEvents && collapsed ? "none" : "auto"}
+      style={[
+        rootStyle,
+        !enablePointerEvents && collapsed ? ({ pointerEvents: "none" } as ViewStyle) : undefined,
+      ]}
     >
       <Animated.View
         ref={contentRef}
-        style={[style, contentStyle]}
-        onLayout={!animating && !collapsed ? onLayoutWhenOpen : undefined}
+        style={[
+          style,
+          innerStyle,
+          phase.status === "measuring"
+            ? ({ position: "absolute", opacity: 0 } as ViewStyle)
+            : undefined,
+        ]}
+        onLayout={isOpen ? onLayoutWhenOpen : undefined}
       >
         {shouldRenderChildren && children}
       </Animated.View>

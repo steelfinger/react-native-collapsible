@@ -4,6 +4,8 @@ Animated collapsible component for React Native. Measures content height before 
 
 ## Installation
 
+This library requires [`react-native-reanimated`](https://docs.swmansion.com/react-native-reanimated/docs/fundamentals/getting-started) v3 or later as a peer dependency. Follow its installation guide first, then:
+
 ```sh
 npm install react-native-collapsible
 ```
@@ -67,8 +69,8 @@ export default function Accordion() {
 |------|------|---------|-------------|
 | `collapsed` | `boolean` | `true` | Whether the content is hidden |
 | `collapsedHeight` | `number` | `0` | Height when collapsed (peek effect) |
-| `duration` | `number` | `800` | Animation duration in ms |
-| `easing` | `EasingFunction` | `Easing.inOut(Easing.cubic)` | Animation easing |
+| `duration` | `number` | `300` | Animation duration in ms |
+| `easing` | `EasingFunction` | `Easing.inOut(Easing.cubic)` | Animation easing (from `react-native-reanimated`) |
 | `align` | `'top' \| 'center' \| 'bottom'` | `'top'` | Content alignment during transition |
 | `enablePointerEvents` | `boolean` | `false` | Allow touch events when collapsed |
 | `renderChildrenCollapsed` | `boolean` | `true` | Keep children mounted when collapsed |
