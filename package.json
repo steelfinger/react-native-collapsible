@@ -24,7 +24,8 @@
   "scripts": {
     "prepare": "bob build",
     "build": "bob build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
   },
   "keywords": [
     "react-native",
@@ -40,11 +41,19 @@
     "react-native": "*"
   },
   "devDependencies": {
+    "@testing-library/react-native": "^12.0.0",
+    "@types/jest": "^29.0.0",
     "@types/react": "^18.0.0",
     "react": "18.2.0",
     "react-native": "0.73.0",
     "react-native-builder-bob": "^0.23.0",
     "typescript": "^5.0.0"
+  },
+  "jest": {
+    "preset": "react-native",
+    "testMatch": [
+      "**/__tests__/**/*.test.{ts,tsx}"
+    ]
   },
   "react-native-builder-bob": {
     "source": "src",
