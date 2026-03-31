@@ -1,4 +1,4 @@
-# react-native-collapsible
+# react-native-collapsible (WIP)
 
 Animated collapsible component for React Native. Measures content height before expanding so the animation always fills exactly the right amount of space — no hard-coded heights needed. Useful for accordions, expandable sections, and any show/hide UI pattern.
 
